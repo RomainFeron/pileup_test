@@ -75,3 +75,5 @@ Thumbs.db
 # -------
 bin/
 build/
+include/*/*.pico
+include/*/*/*.pico

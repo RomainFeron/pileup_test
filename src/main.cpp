@@ -3,91 +3,186 @@
 #include <strings.h>
 #include <stdio.h>
 #include <iostream>
+#include <map>
+#include <vector>
 #include "htslib/htslib/sam.h"
+
+
+struct inputFile {
+    htsFile *sam;
+    hts_idx_t *idx;
+    sam_hdr_t *header;
+    int file_n;
+};
+
+
+int open_input(char *fn_in, inputFile *file, char *reference, int file_n) {
+
+    // Open alignment file and handle opening error
+    if ((file->sam = hts_open(fn_in, "r")) == nullptr) {
+        std::cerr << "Error opening alignment file <" << fn_in << ">" << std::endl;
+        return 1;
+    }
+
+    // CRAM files require a reference
+    if (file->sam->is_cram) {
+        char *ref = reinterpret_cast<char *>(malloc(10 + strlen(reference) + 1));
+        if (!ref) {
+            std::cerr << "Error allocating memory for reference file <" << reference << ">" << std::endl;
+            return 1;
+        }
+        sprintf(ref, "reference=%s", reference);  // Creating the string "reference=<provided/path/to/ref>" to add as option to format in htsFile
+        hts_opt_add(reinterpret_cast<hts_opt **>(&file->sam->format.specific), ref);  // Add reference to htsFile
+        free(ref);
+    }
+
+    // Read file header and handle errors
+    if ((file->header = sam_hdr_read(file->sam)) == nullptr) {
+        std::cerr << "Error reading header for alignment file <" << fn_in << ">" << std::endl;
+        return 1;
+    }
+
+    file->idx = sam_index_load(file->sam, fn_in); // Load index for alignment file. Index name is automatically infered from alignment file name
+
+    // Handle error opening index for alignment file
+    if (file->idx == 0) {
+        std::cerr << "Alignment file <" << file->sam->fn << "> is not indexed. Index with 'samtools index " << file->sam->fn << "'" << std::endl;
+        return 1;
+    }
+
+    file->file_n = file_n;
+
+    return 0;
+}
+
+
+int process_file(inputFile* input, char *contig, std::vector<std::vector<uint16_t>>& depths, uint min_qual=0) {
+
+    hts_itr_t *iter = nullptr;
+    bam1_t *b = bam_init1();
+    int result;
+
+    iter = sam_itr_querys(input->idx, input->header, contig); // parse a region in the format like `chr2:100-200'
+    if (iter == NULL) { // region invalid or reference name not found
+        std::cerr << "Region <" << contig << "> not found in index file";
+        return 1;
+    }
+
+    long pos = 0;
+    long read_length = 0;
+    uint8_t *q = 0;
+    uint16_t mapping_quality = 0;
+    char qseq;
+
+    while ((result = sam_itr_next(input->sam, iter, b)) >= 0) {
+        mapping_quality = b->core.qual ;
+        if (mapping_quality < min_qual) continue;
+        pos = b->core.pos;
+        read_length = b->core.l_qseq;
+        q = bam_get_seq(b);
+        for(int p=0; p<read_length ; p++){
+            qseq = seq_nt16_str[bam_seqi(q,p)]; //gets nucleotide id and converts them into IUPAC id.
+            switch (qseq) {
+                case 'A':
+                    ++depths[pos + p + input->file_n * 6][0];
+                    break;
+                case 'T':
+                    ++depths[pos + p + input->file_n * 6][1];
+                    break;
+                case 'G':
+                    ++depths[pos + p + input->file_n * 6][2];
+                    break;
+                case 'C':
+                    ++depths[pos + p + input->file_n * 6][3];
+                    break;
+                case 'N':
+                    ++depths[pos + p + input->file_n * 6][4];
+                    break;
+                default:
+                    ++depths[pos + p + input->file_n * 6][5];
+                    break;
+            }
+        }
+    }
+
+    // Destroy iterator
+    hts_itr_destroy(iter);
+    bam_destroy1(b);
+
+    if (result < -1) {
+        std::cerr << "Error processing contig <" << contig << "> in file <" << input->sam->fn << "> due to truncated file or corrupt BAM index file";
+        return 1;
+    }
+
+    return 0;
+}
 
 int main(int argc, char *argv[]) {
 
-    int ret = 0;
-    samFile *in = nullptr;
-    sam_hdr_t *header = nullptr;
-    char *fn_in = nullptr;
+    int main_return = 0, step_return = 0;
+    char *contig = nullptr;
+    uint32_t contig_len = 0;
+    std::vector<std::vector<uint16_t>> depths;
+    uint n_files = argc - 2;
 
-    std::cout << "Parsing arguments" << std::endl;
-    fn_in = argv[1];
-    htsFormat format;
-    bam1_t *b = bam_init1();
-
-    // First open file to detect format
-    if ((in = hts_open(fn_in, "r")) == nullptr) {
-        ret = 1;
-        goto view_end;
+    if (argc < 3) {
+        std::cerr << "Usage: test reference.fa in.<sam|bam|cram> [in2.<sam|bam|cram> ...]";
+        return 1;
     }
 
-    std::cout << "Detecting format" << std::endl;
+    std::cerr << "Getting command-line arguments" << std::endl;
 
-    if (not in->is_cram) {
-        if (hts_detect_format(in->fp.hfile, &format) < 0) {
-            ret = 1;
-            goto view_end;
+    char *reference = argv[1];
+
+    std::vector<inputFile> input;
+    for (int i=2; i<argc; ++i) {
+        inputFile tmp;
+        step_return = open_input(argv[i], &tmp, reference, i - 2);
+        if (step_return != 0) {
+            main_return = 1;
+            goto end;
         }
-    } else {
-        hts_parse_format(&format, "cram");
+        input.push_back(tmp);
     }
 
-    // First open file to detect format
-    hts_close(in);
+    for (int i=0; i<input[0].header->n_targets; ++i) {
 
+        contig = input[0].header->target_name[i];
+        contig_len = input[0].header->target_len[i];
 
-    if (argc == 3) {
-        std::cout << "Updating format" << std::endl;
-        char *ref = reinterpret_cast<char *>(malloc(10 + strlen(argv[2]) + 1));
-        hts_opt_add(reinterpret_cast<hts_opt **>(format.specific), ref); // HERE UNDERSTAND WHAT TO DO
-    }
+        std::cerr << "Processing contig " << contig << " (" << contig_len << " bp)" << std::endl;
 
-    std::cout << "Opening files" << std::endl;
+        depths.resize(0);
+        depths.resize(contig_len);
+        for (uint k=0; k<contig_len; ++k) {
+            depths[k].resize(6 * n_files);
+        }
 
-    // open file handlers
-    if ((in = hts_open_format(fn_in, "r", &format)) == nullptr) {
-        ret = 1;
-        goto view_end;
-    }
+        for (auto file: input) {
+            step_return = process_file(&file, contig, depths);
+            if (step_return != 0) {
+                main_return = 1;
+                goto end;
+            }
+        }
 
-    if ((header = sam_hdr_read(in)) == nullptr) {
-        ret = 1;
-        goto view_end;
-    }
-
-    std::cout << "Reading bam" << std::endl;
-
-    int r;
-    while ((r = sam_read1(in, header, b)) >= 0) {
-        std::cout << "New" << std::endl;
-        long pos = b->core.pos +1; //left most position of alignment in zero based coordianate (+1)
-        std::cout << "Pos: " << pos << std::endl;
-        std::cout << "chr-tid: " << b->core.tid << std::endl;
-        char *chr = header->target_name[b->core.tid] ; //contig name (chromosome)
-        std::cout << "chr: " << chr << std::endl;
-        long len = b->core.l_qseq; //length of the read.
-        std::cout << "len: " << len << std::endl;
-        uint8_t *q = bam_get_seq(b); //quality string
-        uint32_t q2 = b->core.qual ; //mapping quality
-        std::cout << "mapQ: " << q2 << std::endl;
-        char *qseq = (char *)malloc(len);
-        for(int i=0; i< len ; i++){
-            qseq[i] = seq_nt16_str[bam_seqi(q,i)]; //gets nucleotide id and converts them into IUPAC id.
+        std::cout << "contig=" << contig << "\tlen=" << contig_len << "\n";
+        for (uint j=0; j<contig_len; ++j) {
+            for (uint k=0; k<n_files; ++k) {
+                for (uint l=0; l<6; ++l) {
+                    std::cout << depths[j][l + 6 * k];
+                    if (l < 5) std::cout << ",";
+                }
+                (k < input.size() - 1) ? std::cout << "\t" : std::cout << "\n";
+            }
         }
     }
-    if (r < -1) {
-        fprintf(stderr, "[main_samview] truncated file.\n");
-        ret = 1;
+
+end:
+    for (auto f: input) {
+        if (f.sam) hts_close(f.sam);
+        if (f.header) sam_hdr_destroy(f.header);
+        if (f.idx) hts_idx_destroy(f.idx);
     }
-    bam_destroy1(b);
-
-
-view_end:
-
-    // close files, free and return
-    if (in) hts_close(in);
-//    if (header) sam_hdr_destroy(header);
-    return ret;
+    return main_return;
 }

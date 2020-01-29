@@ -31,7 +31,7 @@ $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -I $(INCLUDE) -o $(BIN)/$(TARGET) $^ $(INCLUDE)/htslib/libhts.a $(LDFLAGS)
 
 $(BUILD)/%.o: $(SRC)/%.cpp
-	$(CC) $(CFLAGS) -I $(INCLUDE) -c -o $@ $^ $(INCLUDE)/htslib/libhts.a
+	$(CC) $(CFLAGS) -I $(INCLUDE) -c -o $@ $^
 
 clean:
 	rm -rf $(BUILD)/*.o
@@ -42,4 +42,4 @@ init:
 	mkdir -p $(BUILD) $(BUILD)
 	mkdir -p $(BIN) $(BIN)
 
-rebuild: clean $(TARGET)
+rebuild: clean all
