@@ -5,6 +5,7 @@
 #include <iostream>
 #include <map>
 #include <vector>
+#include <algorithm>
 #include "htslib/htslib/sam.h"
 #include "htslib/faidx.h"
 
@@ -68,43 +69,50 @@ int process_file(inputFile* input, char *region, std::vector<std::vector<uint16_
         return 1;
     }
 
-    uint32_t mapping_position = 0, depths_index = 0;
-    long read_length = 0;
+    uint32_t mapping_position = 0;
     uint8_t *sequence = nullptr;
     uint16_t mapping_quality = 0;
     char nucleotide;
+    uint32_t *cigar = nullptr;
 
     // Iterate through all alignments in the specified region
     while ((result = sam_itr_next(input->sam, iter, b)) >= 0) {
         mapping_quality = b->core.qual ;
         if (mapping_quality < min_qual) continue;  // Skip reads with low mapping quality
         mapping_position = static_cast<uint32_t>(b->core.pos);
-        read_length = b->core.l_qseq;
         sequence = bam_get_seq(b);
-        // Iterate over sequence and process each nucleotide
-        for(uint16_t read_position=0; read_position<read_length ; read_position++){
-            depths_index = mapping_position + read_position + input->file_n * 6;
-            nucleotide = seq_nt16_str[bam_seqi(sequence, read_position)]; // Get nucleotide id from read sequence and convert it to <ATGCN>.
-            switch (nucleotide) {
-                case 'A':
-                    ++depths[depths_index][0];
-                    break;
-                case 'T':
-                    ++depths[depths_index][1];
-                    break;
-                case 'G':
-                    ++depths[depths_index][2];
-                    break;
-                case 'C':
-                    ++depths[depths_index][3];
-                    break;
-                case 'N':
-                    ++depths[depths_index][4];
-                    break;
-                default:
-                    ++depths[depths_index][5];
-                    break;
+        cigar = bam_get_cigar(b);
+        for (uint k = 0; k < b->core.n_cigar; ++k) {
+          uint op = bam_cigar_op(cigar[k]);
+          uint l = bam_cigar_oplen(cigar[k]);
+          if (op == BAM_CMATCH) {
+            for (uint j = mapping_position; j < mapping_position + l; ++j) {
+                nucleotide = seq_nt16_str[bam_seqi(sequence, j - mapping_position)]; // Get nucleotide id from read sequence and convert it to <ATGCN>.
+                switch (nucleotide) {
+                    case 'A':
+                        ++depths[j][input->file_n * 6];
+                        break;
+                    case 'T':
+                        ++depths[j][input->file_n * 6 + 1];
+                        break;
+                    case 'C':
+                        ++depths[j][input->file_n * 6 + 2];
+                        break;
+                    case 'G':
+                        ++depths[j][input->file_n * 6 + 3];
+                        break;
+                    case 'N':
+                        ++depths[j][input->file_n * 6 + 4];
+                        break;
+                    default:
+                        ++depths[j][input->file_n * 6 + 5];
+                        break;
+                }
             }
+            mapping_position += l;
+          } else if (op == BAM_CREF_SKIP || op == BAM_CDEL) {
+              mapping_position += l;
+          }
         }
     }
 
@@ -167,7 +175,7 @@ int main(int argc, char *argv[]) {
 
         // Process each alignment file
         for (auto file: input) {
-            if (process_file(&file, contig, depths) != 0) {
+            if (process_file(&file, contig, depths, 0) != 0) {
                 main_return = 1;
                 goto end;
             }
