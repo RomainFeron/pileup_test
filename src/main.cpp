@@ -6,17 +6,18 @@
 #include <map>
 #include <vector>
 #include "htslib/htslib/sam.h"
+#include "htslib/faidx.h"
 
 
 struct inputFile {
     htsFile *sam;
     hts_idx_t *idx;
     sam_hdr_t *header;
-    int file_n;
+    uint16_t file_n;
 };
 
 
-int open_input(char *fn_in, inputFile *file, char *reference, int file_n) {
+int open_input(char *fn_in, inputFile *file, char *reference, uint16_t file_n) {
 
     // Open alignment file and handle opening error
     if ((file->sam = hts_open(fn_in, "r")) == nullptr) {
@@ -27,6 +28,7 @@ int open_input(char *fn_in, inputFile *file, char *reference, int file_n) {
     // CRAM files require a reference
     if (file->sam->is_cram) {
         char *ref = reinterpret_cast<char *>(malloc(10 + strlen(reference) + 1));
+        char *fai_path;
         if (!ref) {
             std::cerr << "Error allocating memory for reference file <" << reference << ">" << std::endl;
             return 1;
@@ -34,6 +36,9 @@ int open_input(char *fn_in, inputFile *file, char *reference, int file_n) {
         sprintf(ref, "reference=%s", reference);  // Creating the string "reference=<provided/path/to/ref>" to add as option to format in htsFile
         hts_opt_add(reinterpret_cast<hts_opt **>(&file->sam->format.specific), ref);  // Add reference to htsFile
         free(ref);
+        fai_path = reinterpret_cast<char *>(malloc(5 + strlen(reference)));
+        sprintf(fai_path, "%s.fai", reference);
+        hts_set_fai_filename(file->sam, fai_path);
     }
 
     // Read file header and handle errors
@@ -45,7 +50,7 @@ int open_input(char *fn_in, inputFile *file, char *reference, int file_n) {
     file->idx = sam_index_load(file->sam, fn_in); // Load index for alignment file. Index name is automatically infered from alignment file name
 
     // Handle error opening index for alignment file
-    if (file->idx == 0) {
+    if (file->idx == nullptr) {
         std::cerr << "Alignment file <" << file->sam->fn << "> is not indexed. Index with 'samtools index " << file->sam->fn << "'" << std::endl;
         return 1;
     }
@@ -63,24 +68,24 @@ int process_file(inputFile* input, char *contig, std::vector<std::vector<uint16_
     int result;
 
     iter = sam_itr_querys(input->idx, input->header, contig); // parse a region in the format like `chr2:100-200'
-    if (iter == NULL) { // region invalid or reference name not found
+    if (iter == nullptr) { // region invalid or reference name not found
         std::cerr << "Region <" << contig << "> not found in index file";
         return 1;
     }
 
-    long pos = 0;
+    uint32_t pos = 0;
     long read_length = 0;
-    uint8_t *q = 0;
+    uint8_t *q = nullptr;
     uint16_t mapping_quality = 0;
     char qseq;
 
     while ((result = sam_itr_next(input->sam, iter, b)) >= 0) {
         mapping_quality = b->core.qual ;
         if (mapping_quality < min_qual) continue;
-        pos = b->core.pos;
+        pos = static_cast<uint32_t>(b->core.pos);
         read_length = b->core.l_qseq;
         q = bam_get_seq(b);
-        for(int p=0; p<read_length ; p++){
+        for(uint16_t p=0; p<read_length ; p++){
             qseq = seq_nt16_str[bam_seqi(q,p)]; //gets nucleotide id and converts them into IUPAC id.
             switch (qseq) {
                 case 'A':
@@ -123,7 +128,7 @@ int main(int argc, char *argv[]) {
     char *contig = nullptr;
     uint32_t contig_len = 0;
     std::vector<std::vector<uint16_t>> depths;
-    uint n_files = argc - 2;
+    uint n_files = static_cast<uint>(argc) - 2;
 
     if (argc < 3) {
         std::cerr << "Usage: test reference.fa in.<sam|bam|cram> [in2.<sam|bam|cram> ...]";
@@ -135,7 +140,7 @@ int main(int argc, char *argv[]) {
     char *reference = argv[1];
 
     std::vector<inputFile> input;
-    for (int i=2; i<argc; ++i) {
+    for (uint16_t i=2; i<argc; ++i) {
         inputFile tmp;
         step_return = open_input(argv[i], &tmp, reference, i - 2);
         if (step_return != 0) {
