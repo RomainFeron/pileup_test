@@ -34,7 +34,13 @@ int open_input(char *fn_in, inputFile *file, std::string &reference, uint16_t fi
         std::string ref_option = "reference=" + reference; // Create the string "reference=<provided/path/to/ref>" to add as option to format in htsFile
         hts_opt_add(reinterpret_cast<hts_opt **>(&file->sam->format.specific), ref_option.c_str());  // Add reference to htsFile
         std::string fai_path = reference + ".fai";  // Create the string "<provided/path/to/ref.fai>"
-        hts_set_fai_filename(file->sam, fai_path.c_str());  // Set reference index path in file descriptor
+        if (hts_set_fai_filename(file->sam, fai_path.c_str()) < 0) {  // Set reference index path in file descriptor
+            std::cerr << "Warning: index file not found for reference file <" << reference << ">. Indexing reference" << std::endl;
+            if (fai_build(reference.c_str()) < 0) {  // Build reference fasta index if missing
+                std::cerr << "Error: could not build index for reference file <" << reference << ">" << std::endl;
+                return 1;
+            }
+        }
     }
 
     // Read file header and handle errors
